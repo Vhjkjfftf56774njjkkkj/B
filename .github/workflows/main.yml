@@ -81,16 +81,75 @@ jobs:
       - name: Install BlueStacks 5 (Hyper-V Compatible + Kill Update Completely)
         shell: pwsh
         run: |
-          .\report-log.ps1 "📱 Đang tải BlueStacks 5 offline installer..."
-          $bsUrl = "https://cdn.bluestacks.com/public/recommended/downloads/v5.22.166.1003/BlueStacksFullInstaller_5.22.166.1003_amd64_native.exe"
-          Invoke-WebRequest -Uri $bsUrl -OutFile "BSInstaller.exe"
-          .\report-log.ps1 "✅ Đã tải BlueStacks installer."
+          .\report-log.ps1 "📱 Đang tải BlueStacks 5 installer..."
 
+          # ============================================
+          # TẢI INSTALLER - Thử nhiều nguồn
+          # ============================================
+          $installed = $false
+
+          # Nguồn 1: API lấy URL mới nhất
+          try {
+            .\report-log.ps1 "🔍 Thử tải qua BlueStacks API..."
+            $apiResp = Invoke-WebRequest -Uri "https://cloud.bluestacks.com/api/getdownloadnow?platform=win" `
+              -MaximumRedirection 0 -UseBasicParsing -SkipHttpError -TimeoutSec 30
+            $apiUrl = $apiResp.Headers.Location.Split('?')[0]
+            if ($apiUrl) {
+              .\report-log.ps1 "  → API trả về URL: $apiUrl"
+              Invoke-WebRequest -Uri $apiUrl -OutFile "BSInstaller.exe" -UseBasicParsing -TimeoutSec 600
+              $fileSize = (Get-Item "BSInstaller.exe").Length
+              .\report-log.ps1 "  ✅ Đã tải ($([math]::Round($fileSize/1MB, 1)) MB)"
+              $installed = $true
+            }
+          } catch {
+            .\report-log.ps1 "  ⚠️ API thất bại: $_"
+          }
+
+          # Nguồn 2: Direct URL ak-build (version 5.22.166.1003)
+          if (-not $installed) {
+            try {
+              .\report-log.ps1 "🔍 Thử tải qua direct URL ak-build..."
+              $directUrl = "https://ak-build.bluestacks.com/public/app-player/windows/nxt/5.22.166.1003/e0cbf0a49445273dc3c94ced970fd7d4/FullInstaller/x64/BlueStacksFullInstaller_5.22.166.1003_amd64_native.exe"
+              Invoke-WebRequest -Uri $directUrl -OutFile "BSInstaller.exe" -UseBasicParsing -TimeoutSec 600
+              $fileSize = (Get-Item "BSInstaller.exe").Length
+              .\report-log.ps1 "  ✅ Đã tải ($([math]::Round($fileSize/1MB, 1)) MB)"
+              $installed = $true
+            } catch {
+              .\report-log.ps1 "  ⚠️ Direct URL thất bại: $_"
+            }
+          }
+
+          # Nguồn 3: Version cũ hơn 5.22.150.1014
+          if (-not $installed) {
+            try {
+              .\report-log.ps1 "🔍 Thử tải version 5.22.150.1014..."
+              $fallbackUrl = "https://ak-build.bluestacks.com/public/app-player/windows/nxt/5.22.150.1014/c6b85b9680fe708a143d721bdc7dd4e3/FullInstaller/x64/BlueStacksFullInstaller_5.22.150.1014_amd64_native.exe"
+              Invoke-WebRequest -Uri $fallbackUrl -OutFile "BSInstaller.exe" -UseBasicParsing -TimeoutSec 600
+              $fileSize = (Get-Item "BSInstaller.exe").Length
+              .\report-log.ps1 "  ✅ Đã tải ($([math]::Round($fileSize/1MB, 1)) MB)"
+              $installed = $true
+            } catch {
+              .\report-log.ps1 "  ⚠️ Fallback URL thất bại: $_"
+            }
+          }
+
+          if (-not $installed) {
+            throw "❌ Không thể tải BlueStacks installer từ bất kỳ nguồn nào!"
+          }
+
+          # ============================================
+          # CÀI ĐẶT - Pie64 (Hyper-V compatible)
+          # ============================================
           .\report-log.ps1 "⚙️ Cài đặt BlueStacks (Pie64 - Hyper-V compatible)..."
-          Start-Process -FilePath ".\BSInstaller.exe" `
+          $proc = Start-Process -FilePath ".\BSInstaller.exe" `
             -ArgumentList '-s','--defaultImageName','Pie64','--imageToLaunch','Pie64' `
-            -Wait -NoNewWindow
-          .\report-log.ps1 "✅ Cài đặt BlueStacks hoàn tất."
+            -NoNewWindow -PassThru
+          $proc.WaitForExit(600000) | Out-Null
+          if (-not $proc.HasExited) {
+            .\report-log.ps1 "⚠️ Cài đặt lâu, kill process..."
+            $proc.Kill()
+          }
+          .\report-log.ps1 "✅ Cài đặt BlueStacks hoàn tất (exit code: $($proc.ExitCode))."
 
           # ============================================
           # TẦNG 1: Disable Service + Kill Process updater
@@ -98,7 +157,7 @@ jobs:
           .\report-log.ps1 "🚫 Tầng 1: Disable Updater Service..."
           Stop-Service -Name "BstHdUpdaterSvc" -Force -ErrorAction SilentlyContinue
           Set-Service -Name "BstHdUpdaterSvc" -StartupType Disabled -ErrorAction SilentlyContinue
-          Get-Process -Name "HD-UpdaterService","HD-Agent","HD-NotificationService" -ErrorAction SilentlyContinue | 
+          Get-Process -Name "HD-UpdaterService","HD-Agent","HD-NotificationService" -ErrorAction SilentlyContinue |
             Stop-Process -Force -ErrorAction SilentlyContinue
 
           # ============================================
@@ -119,10 +178,9 @@ jobs:
               Set-ItemProperty -Path $path -Name "EnableUpdateCheck" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
             }
           }
-          # Disable scheduled tasks của BlueStacks
-          Get-ScheduledTask -TaskName "*BlueStacks*" -ErrorAction SilentlyContinue | 
+          Get-ScheduledTask -TaskName "*BlueStacks*" -ErrorAction SilentlyContinue |
             Disable-ScheduledTask -ErrorAction SilentlyContinue
-          Get-ScheduledTask -TaskName "*BstHd*" -ErrorAction SilentlyContinue | 
+          Get-ScheduledTask -TaskName "*BstHd*" -ErrorAction SilentlyContinue |
             Disable-ScheduledTask -ErrorAction SilentlyContinue
 
           # ============================================
@@ -157,7 +215,7 @@ jobs:
             "cloud.bluestacks.com"
           )
           $hostsContent = Get-Content $hostsPath -ErrorAction SilentlyContinue
-          $newEntries = $domainsToBlock | ForEach-Object { 
+          $newEntries = $domainsToBlock | ForEach-Object {
             if ($hostsContent -notmatch $_) { "127.0.0.1 $_" }
           } | Where-Object { $_ }
           if ($newEntries) {
